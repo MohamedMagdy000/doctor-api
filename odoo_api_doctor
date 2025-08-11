@@ -1,0 +1,119 @@
+# controllers/product_api.py
+from odoo import http
+from odoo.http import request
+import json
+import logging
+
+_logger = logging.getLogger(__name__)
+
+def _split_complete_name(complete_name):
+    """
+    يحوّل 'All / Doctor / قلب' -> (['All','Doctor','قلب'], parent='All', child='Doctor')
+    لو مفيش غير جزء واحد -> child='' (فاضي)
+    """
+    if not complete_name:
+        return [], '', ''
+    segs = [s.strip() for s in complete_name.split('/') if s and s.strip()]
+    parent = segs[0] if len(segs) >= 1 else ''
+    child  = segs[1] if len(segs) >= 2 else ''
+    return segs, parent, child
+
+
+class PublicProductController(http.Controller):
+
+    # ========= المنتجات =========
+    @http.route('/odoo/public/products', type='http', auth='public', methods=['GET'], cors='*')
+    def get_products(self, **kwargs):
+        """
+        يرجّع قائمة المنتجات مع حقول واضحة للأب/الابن:
+        id, name, category, category_id, category_parent, category_path, parent, child, segments[], image
+        """
+        try:
+            products = request.env['product.template'].sudo().search([])
+            result = []
+            for p in products:
+                cat = p.categ_id
+                cat_name = cat.name if cat else ''
+                cat_id = cat.id if cat else False
+                parent_name = cat.parent_id.name if (cat and cat.parent_id) else ''
+                complete_name = cat.complete_name if cat else ''   # مثال: "All / Doctor / قلب"
+
+                segs, parent, child = _split_complete_name(complete_name or cat_name)
+
+                result.append({
+                    'id': p.id,
+                    'name': p.name or '',
+
+                    # معلومات التصنيف الخام من أودو
+                    'category': cat_name,
+                    'category_id': cat_id,
+                    'category_parent': parent_name or False,
+                    'category_path': complete_name,
+
+                    # مفصّلة للاستخدام المباشر في الواجهة
+                    'parent': parent,          # الأب
+                    'child': child,            # الابن (إن وُجد)
+                    'segments': segs,          # كل الأجزاء كـ Array
+
+                    # صورة مناسبة
+                    'image': f'/web/image/product.template/{p.id}/image_512',
+                })
+
+            return request.make_response(
+                json.dumps(result, ensure_ascii=False),
+                headers=[('Content-Type', 'application/json; charset=utf-8')]
+            )
+        except Exception as e:
+            _logger.exception('Error in /odoo/public/products: %s', e)
+            return request.make_response(
+                json.dumps({'error': 'internal_error', 'details': str(e)}),
+                headers=[('Content-Type', 'application/json')],
+                status=500
+            )
+
+    # ========= تصنيفات (Parents + Children) =========
+    @http.route('/odoo/public/categories', type='http', auth='public', methods=['GET'], cors='*')
+    def get_categories(self, **kwargs):
+        """
+        يرجّع كل الـ parents ومع كل parent قائمة الـ children:
+        [
+          { "id": 1, "name": "All", "complete_name": "All", "children": [
+              {"id": 6, "name": "Doctor", "complete_name": "All / Doctor"},
+              {"id": 7, "name": "صيدليات", "complete_name": "All / صيدليات"}
+          ]},
+          ...
+        ]
+        """
+        try:
+            Cat = request.env['product.category'].sudo()
+            parents = Cat.search([('parent_id', '=', False)], order='name asc')
+            # خريطة الأب -> أولاده
+            children_map = {}
+            for c in Cat.search([('parent_id', '!=', False)], order='name asc'):
+                pid = c.parent_id.id
+                children_map.setdefault(pid, []).append({
+                    'id': c.id,
+                    'name': c.name,
+                    'complete_name': c.complete_name,
+                })
+
+            payload = []
+            for p in parents:
+                payload.append({
+                    'id': p.id,
+                    'name': p.name,
+                    'complete_name': p.complete_name,
+                    'children': children_map.get(p.id, []),
+                })
+
+            return request.make_response(
+                json.dumps(payload, ensure_ascii=False),
+                headers=[('Content-Type', 'application/json; charset=utf-8')]
+            )
+        except Exception as e:
+            _logger.exception('Error in /odoo/public/categories: %s', e)
+            return request.make_response(
+                json.dumps({'error': 'internal_error', 'details': str(e)}),
+                headers=[('Content-Type', 'application/json')],
+                status=500
+            )
